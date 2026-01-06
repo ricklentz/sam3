@@ -168,6 +168,68 @@ class Sam3Processor:
             if key in state:
                 del state[key]
 
+    def clear_state(self, state: Dict):
+        """Completely clear state dict and free GPU memory.
+
+        Call this after copying state to CPU to release VRAM.
+        """
+        if state is None:
+            return
+
+        # Delete all tensors in state
+        keys = list(state.keys())
+        for key in keys:
+            val = state[key]
+            if isinstance(val, torch.Tensor):
+                del state[key]
+            elif isinstance(val, dict):
+                self.clear_state(val)
+
+        state.clear()
+        torch.cuda.empty_cache()
+
+    @torch.inference_mode()
+    def encode_text(self, prompt: str) -> torch.Tensor:
+        """Encode text prompt to embedding vector.
+
+        Use this to get a reusable text embedding that can be sent to
+        multiple workers/endpoints for searching without re-encoding.
+
+        Args:
+            prompt: Text prompt to encode
+
+        Returns:
+            Text embedding tensor (can be moved to CPU for transfer)
+        """
+        text_outputs = self.model.backbone.forward_text([prompt], device=self.device)
+        return text_outputs["language_features"]
+
+    @torch.inference_mode()
+    def segment_with_text_embedding(self, text_embedding: torch.Tensor, state: Dict):
+        """Segment using pre-computed text embedding vector.
+
+        Args:
+            text_embedding: Text embedding from encode_text()
+            state: State dict from set_image()
+
+        Returns:
+            State dict with masks, boxes, scores
+        """
+        if "backbone_out" not in state:
+            raise ValueError("You must call set_image before segment_with_text_embedding")
+
+        # Move embedding to device if needed
+        if text_embedding.device != torch.device(self.device):
+            text_embedding = text_embedding.to(self.device)
+
+        # Inject pre-computed text embedding
+        state["backbone_out"]["language_features"] = text_embedding
+
+        if "geometric_prompt" not in state:
+            state["geometric_prompt"] = self.model._get_dummy_prompt()
+
+        return self._forward_grounding(state)
+
     @torch.inference_mode()
     def set_confidence_threshold(self, threshold: float, state=None):
         """Sets the confidence threshold for the masks"""
