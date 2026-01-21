@@ -1,9 +1,10 @@
 # Copyright (c) Meta Platforms, Inc. and affiliates. All Rights Reserved
 
+# pyre-unsafe
+
 import os
 from typing import Optional
 from importlib import resources
-
 import torch
 import torch.nn as nn
 from huggingface_hub import hf_hub_download
