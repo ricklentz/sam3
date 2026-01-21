@@ -231,6 +231,160 @@ class Sam3Processor:
         return self._forward_grounding(state)
 
     @torch.inference_mode()
+    def segment_with_visual_embedding(
+        self,
+        visual_embedding: torch.Tensor,
+        state: Dict,
+        threshold: float = 0.5,
+        box_size: float = 0.05,
+    ):
+        """Segment using a visual embedding from a previously masked object.
+
+        Finds the location with highest cosine similarity to the embedding in the
+        current frame's vision features, then segments at that point using a
+        geometric prompt.
+
+        This enables "search by example" - given an object's embedding from one
+        frame, find and segment the same object in another frame.
+
+        Args:
+            visual_embedding: [C] or [1, C] visual embedding from masked average
+                pooling over vision features (typically 256-dim)
+            state: State dict from set_image()
+            threshold: Minimum cosine similarity to consider a match (0-1)
+            box_size: Size of box prompt as fraction of image (default 5%)
+
+        Returns:
+            State dict with masks, boxes, scores if match found, else None
+            Also adds 'match_similarity' and 'match_location' to state
+        """
+        import torch.nn.functional as F
+
+        if "backbone_out" not in state:
+            raise ValueError("You must call set_image before segment_with_visual_embedding")
+
+        # Get vision features from backbone
+        vision_features = state["backbone_out"].get("vision_features", None)
+        if vision_features is None:
+            return None
+
+        # vision_features: [1, C, H, W]
+        features = vision_features.squeeze(0)  # [C, H, W]
+        c, h, w = features.shape
+
+        # Flatten spatial dimensions and normalize for cosine similarity
+        features_flat = features.flatten(1).T  # [H*W, C]
+        features_norm = F.normalize(features_flat, dim=1)
+
+        # Prepare embedding
+        emb = visual_embedding.to(self.device)
+        if emb.dim() == 1:
+            emb = emb.unsqueeze(0)  # [1, C]
+        emb_norm = F.normalize(emb, dim=1)
+
+        # Compute similarity map: [H*W, 1] -> [H*W]
+        similarity = (features_norm @ emb_norm.T).squeeze(1)
+
+        # Find max similarity location
+        max_sim, max_idx = similarity.max(dim=0)
+        max_sim = max_sim.item()
+
+        if max_sim < threshold:
+            state["match_similarity"] = max_sim
+            state["match_location"] = None
+            return None
+
+        # Convert flat index to feature map coordinates
+        y_feat = (max_idx // w).item()
+        x_feat = (max_idx % w).item()
+
+        # Scale to normalized [0, 1] coordinates
+        cx = (x_feat + 0.5) / w
+        cy = (y_feat + 0.5) / h
+
+        # Store match info
+        state["match_similarity"] = max_sim
+        state["match_location"] = (cx, cy)
+
+        # Reset any previous prompts
+        self.reset_all_prompts(state)
+
+        # Use geometric prompt (box) at the matched location
+        box = [cx, cy, box_size, box_size]  # [cx, cy, w, h] normalized
+        return self.add_geometric_prompt(box=box, label=True, state=state)
+
+    @torch.inference_mode()
+    def find_visual_embedding_locations(
+        self,
+        visual_embeddings: torch.Tensor,
+        state: Dict,
+        threshold: float = 0.5,
+    ):
+        """Find locations of multiple objects by their visual embeddings.
+
+        Batch version of segment_with_visual_embedding that returns locations
+        without segmenting. Useful for checking which objects from a registry
+        are present in the current frame.
+
+        Args:
+            visual_embeddings: [K, C] tensor of K object embeddings
+            state: State dict from set_image()
+            threshold: Minimum cosine similarity threshold
+
+        Returns:
+            Dict with:
+                - hits: [K] boolean tensor of which objects were found
+                - similarities: [K] max similarity for each object
+                - locations: [K, 2] normalized (cx, cy) locations for each object
+        """
+        import torch.nn.functional as F
+
+        if "backbone_out" not in state:
+            raise ValueError("You must call set_image first")
+
+        vision_features = state["backbone_out"].get("vision_features", None)
+        if vision_features is None:
+            k = visual_embeddings.shape[0]
+            return {
+                "hits": torch.zeros(k, dtype=torch.bool, device=self.device),
+                "similarities": torch.zeros(k, dtype=torch.float32, device=self.device),
+                "locations": torch.zeros(k, 2, dtype=torch.float32, device=self.device),
+            }
+
+        # vision_features: [1, C, H, W]
+        features = vision_features.squeeze(0)  # [C, H, W]
+        c, h, w = features.shape
+
+        # Normalize features
+        features_flat = features.flatten(1).T  # [H*W, C]
+        features_norm = F.normalize(features_flat, dim=1)
+
+        # Normalize embeddings
+        embs = visual_embeddings.to(self.device)
+        if embs.dim() == 1:
+            embs = embs.unsqueeze(0)
+        embs_norm = F.normalize(embs, dim=1)  # [K, C]
+
+        # Compute similarity: [H*W, C] @ [C, K] -> [H*W, K]
+        similarity_map = features_norm @ embs_norm.T
+
+        # Find max per object
+        max_sims, max_indices = similarity_map.max(dim=0)  # [K], [K]
+
+        # Convert indices to locations
+        y_feats = max_indices // w
+        x_feats = max_indices % w
+        cx = (x_feats.float() + 0.5) / w
+        cy = (y_feats.float() + 0.5) / h
+        locations = torch.stack([cx, cy], dim=1)  # [K, 2]
+
+        return {
+            "hits": max_sims > threshold,
+            "similarities": max_sims,
+            "locations": locations,
+        }
+
+    @torch.inference_mode()
     def set_confidence_threshold(self, threshold: float, state=None):
         """Sets the confidence threshold for the masks"""
         self.confidence_threshold = threshold
