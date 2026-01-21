@@ -276,8 +276,8 @@ class Sam3Processor:
         features_flat = features.flatten(1).T  # [H*W, C]
         features_norm = F.normalize(features_flat, dim=1)
 
-        # Prepare embedding
-        emb = visual_embedding.to(self.device)
+        # Prepare embedding - cast to match features dtype
+        emb = visual_embedding.to(device=self.device, dtype=features.dtype)
         if emb.dim() == 1:
             emb = emb.unsqueeze(0)  # [1, C]
         emb_norm = F.normalize(emb, dim=1)
@@ -359,8 +359,8 @@ class Sam3Processor:
         features_flat = features.flatten(1).T  # [H*W, C]
         features_norm = F.normalize(features_flat, dim=1)
 
-        # Normalize embeddings
-        embs = visual_embeddings.to(self.device)
+        # Normalize embeddings - cast to match features dtype
+        embs = visual_embeddings.to(device=self.device, dtype=features.dtype)
         if embs.dim() == 1:
             embs = embs.unsqueeze(0)
         embs_norm = F.normalize(embs, dim=1)  # [K, C]
