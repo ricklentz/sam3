@@ -147,6 +147,81 @@ response = video_predictor.handle_request(
 output = response["outputs"]
 ```
 
+### Embedding API
+
+SAM3 provides methods to extract and search with embeddings, enabling efficient object tracking and "search by example" across frames.
+
+#### Text Embeddings
+
+Pre-compute text embeddings once and reuse across multiple images:
+
+```python
+# Encode text prompt to reusable embedding
+text_embedding = processor.encode_text("person")
+
+# Search in multiple frames without re-encoding text
+for image in images:
+    state = processor.set_image(image)
+    output = processor.segment_with_text_embedding(text_embedding, state)
+    masks, boxes, scores = output["masks"], output["boxes"], output["scores"]
+```
+
+#### Visual Embeddings (Search by Example)
+
+Extract an object's visual embedding from one frame and find the same object in other frames:
+
+```python
+import torch.nn.functional as F
+
+# First, segment an object in frame 1
+state1 = processor.set_image(frame1)
+output1 = processor.set_text_prompt(state=state1, prompt="dog")
+mask = output1["masks"][0]  # Get first mask
+
+# Extract visual embedding by pooling vision features within the mask
+vision_features = state1["backbone_out"]["vision_features"]  # [1, C, H, W]
+features = vision_features.squeeze(0)  # [C, H, W]
+mask_resized = F.interpolate(
+    mask.unsqueeze(0).unsqueeze(0).float(),
+    size=features.shape[-2:],
+    mode='bilinear'
+).squeeze() > 0.5
+visual_embedding = (features * mask_resized).sum(dim=(1, 2)) / mask_resized.sum()
+
+# Search for same object in frame 2
+state2 = processor.set_image(frame2)
+output2 = processor.segment_with_visual_embedding(visual_embedding, state2, threshold=0.5)
+if output2 is not None:
+    masks2, boxes2 = output2["masks"], output2["boxes"]
+    similarity = state2["match_similarity"]  # How confident the match is
+    location = state2["match_location"]      # (cx, cy) normalized coordinates
+```
+
+#### Batch Search (Multiple Objects)
+
+Find multiple objects from a registry in a single frame:
+
+```python
+# Registry of K object embeddings [K, C]
+registry = torch.stack([emb1, emb2, emb3, ...])
+
+# Find which objects are present and where
+state = processor.set_image(frame)
+results = processor.find_visual_embedding_locations(registry, state, threshold=0.5)
+
+hits = results["hits"]           # [K] boolean - which objects found
+similarities = results["similarities"]  # [K] confidence scores
+locations = results["locations"]       # [K, 2] normalized (cx, cy) coords
+
+# Segment only the objects that were found
+for i, (hit, loc) in enumerate(zip(hits, locations)):
+    if hit:
+        cx, cy = loc.tolist()
+        output = processor.add_geometric_prompt(
+            box=[cx, cy, 0.05, 0.05], label=True, state=state
+        )
+```
+
 ## Examples
 
 The `examples` directory contains notebooks demonstrating how to use SAM3 with
