@@ -190,23 +190,79 @@ class Sam3Processor:
 
     @torch.inference_mode()
     def encode_text(self, prompt: str) -> torch.Tensor:
-        """Encode text prompt to embedding vector.
-
-        Use this to get a reusable text embedding that can be sent to
-        multiple workers/endpoints for searching without re-encoding.
+        """Encode text prompt to embedding vector (legacy, use encode_text_prompt instead).
 
         Args:
             prompt: Text prompt to encode
 
         Returns:
-            Text embedding tensor (can be moved to CPU for transfer)
+            Text embedding tensor (language_features only)
         """
         text_outputs = self.model.backbone.forward_text([prompt], device=self.device)
         return text_outputs["language_features"]
 
     @torch.inference_mode()
+    def encode_text_prompt(self, prompt: str) -> Dict:
+        """Encode text prompt to reusable prompt context.
+
+        Returns ALL outputs from text encoding, enabling reuse without re-encoding.
+        Use with segment_with_text_prompt() for cached text segmentation.
+
+        Args:
+            prompt: Text prompt to encode
+
+        Returns:
+            Dict with language_features, language_mask, language_embeds
+        """
+        text_outputs = self.model.backbone.forward_text([prompt], device=self.device)
+        return {
+            "language_features": text_outputs["language_features"],
+            "language_mask": text_outputs["language_mask"],
+            "language_embeds": text_outputs.get("language_embeds"),
+        }
+
+    @torch.inference_mode()
+    def segment_with_text_prompt(self, prompt_ctx: Dict, state: Dict):
+        """Segment using pre-computed text prompt context.
+
+        Args:
+            prompt_ctx: Dict from encode_text_prompt() with language_features, language_mask
+            state: State dict from set_image()
+
+        Returns:
+            State dict with masks, boxes, scores
+        """
+        if "backbone_out" not in state:
+            raise ValueError("You must call set_image before segment_with_text_prompt")
+
+        # Move tensors to device if needed
+        lang_features = prompt_ctx["language_features"]
+        lang_mask = prompt_ctx["language_mask"]
+        lang_embeds = prompt_ctx.get("language_embeds")
+
+        if lang_features.device != torch.device(self.device):
+            lang_features = lang_features.to(self.device)
+        if lang_mask is not None and lang_mask.device != torch.device(self.device):
+            lang_mask = lang_mask.to(self.device)
+        if lang_embeds is not None and lang_embeds.device != torch.device(self.device):
+            lang_embeds = lang_embeds.to(self.device)
+
+        # Inject full text encoding into state
+        state["backbone_out"]["language_features"] = lang_features
+        state["backbone_out"]["language_mask"] = lang_mask
+        if lang_embeds is not None:
+            state["backbone_out"]["language_embeds"] = lang_embeds
+
+        if "geometric_prompt" not in state:
+            state["geometric_prompt"] = self.model._get_dummy_prompt()
+
+        return self._forward_grounding(state)
+
+    @torch.inference_mode()
     def segment_with_text_embedding(self, text_embedding: torch.Tensor, state: Dict):
-        """Segment using pre-computed text embedding vector.
+        """Segment using pre-computed text embedding (legacy, use segment_with_text_prompt).
+
+        Note: This may fail if language_mask is not in state. Use segment_with_text_prompt instead.
 
         Args:
             text_embedding: Text embedding from encode_text()
