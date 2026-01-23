@@ -235,26 +235,24 @@ class Sam3Processor:
         if "backbone_out" not in state:
             raise ValueError("You must call set_image before segment_with_text_prompt")
 
-        # Move tensors to device if needed
+        # Reset previous prompts and results (like segment_text does)
+        # Only clear results, keep language_* since we'll overwrite them
+        keys_to_del = ["geometric_prompt", "boxes", "masks", "masks_logits", "scores"]
+        for key in keys_to_del:
+            if key in state:
+                del state[key]
+
+        # Inject cached text encoding into state
         lang_features = prompt_ctx["language_features"]
         lang_mask = prompt_ctx["language_mask"]
         lang_embeds = prompt_ctx.get("language_embeds")
 
-        if lang_features.device != torch.device(self.device):
-            lang_features = lang_features.to(self.device)
-        if lang_mask is not None and lang_mask.device != torch.device(self.device):
-            lang_mask = lang_mask.to(self.device)
-        if lang_embeds is not None and lang_embeds.device != torch.device(self.device):
-            lang_embeds = lang_embeds.to(self.device)
-
-        # Inject full text encoding into state
         state["backbone_out"]["language_features"] = lang_features
         state["backbone_out"]["language_mask"] = lang_mask
         if lang_embeds is not None:
             state["backbone_out"]["language_embeds"] = lang_embeds
 
-        if "geometric_prompt" not in state:
-            state["geometric_prompt"] = self.model._get_dummy_prompt()
+        state["geometric_prompt"] = self.model._get_dummy_prompt()
 
         return self._forward_grounding(state)
 
